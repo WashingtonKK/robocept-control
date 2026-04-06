@@ -1,0 +1,25 @@
+# Simulation configuration for the diff-drive base adapter.
+#
+# These values should match the Gazebo robot model so the same controller
+# math is exercised in simulation.
+
+/**:
+  ros__parameters:
+    wheel_radius: 0.04
+    wheel_separation: 0.28
+
+    max_linear_vel: 1.0
+    max_angular_vel: 2.0
+
+    control_rate_hz: 20.0
+    cmd_vel_timeout_sec: 0.5
+
+    odom_frame_id: "odom"
+    base_frame_id: "base_footprint"
+    publish_tf: false
+
+    command_in_topic: "/cmd_vel"
+    sim_command_out_topic: "/robocept/base/drive_cmd"
+    sim_odom_in_topic: "/robocept/base/sim_odom"
+    odom_out_topic: "/odom"
+    status_topic: "/robocept/base/status"

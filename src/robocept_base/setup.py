@@ -27,6 +27,7 @@ setup(
     entry_points={
         'console_scripts': [
             'base_driver = robocept_base.base_driver:main',
+            'base_sim_adapter = robocept_base.base_sim_adapter:main',
         ],
     },
 )

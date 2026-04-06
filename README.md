@@ -2,9 +2,15 @@
 
 ROS 2 control layer for a differential-drive (all-wheel) robot. Bridges high-level velocity commands (`/cmd_vel`) to motor hardware and publishes odometry feedback (`/odom`).
 
+The diff-drive math now lives in a pure controller module so the same
+control path can run against either real hardware or Gazebo Sim.
+
 ## Status
 
-**Motor driver: PENDING** — hardware not yet purchased. The `base_driver` node is a placeholder interface. Once you have your motor controller board, implement the serial/I2C/CAN communication in `robocept_base/base_driver.py`.
+**Hardware transport: PENDING** — the hardware-specific I/O in
+`base_driver` is still a placeholder. The controller math and Gazebo
+adapter are in place; once you know the real motor controller, implement
+the serial/I2C/CAN communication in `robocept_base/base_driver.py`.
 
 ## Architecture
 
@@ -12,31 +18,32 @@ ROS 2 control layer for a differential-drive (all-wheel) robot. Bridges high-lev
 /cmd_vel (geometry_msgs/Twist)
     │
     ▼
-┌──────────────┐
-│  base_driver  │  ← YOUR HARDWARE CODE HERE
-│  (this repo)  │
-└──────┬───────┘
-       │  serial / I2C / CAN / GPIO
-       ▼
-   Motor Controller Board
-       │
-       ▼
-   Motors + Encoders
-       │
-       ▼
-┌──────────────┐
-│  base_driver  │  reads encoders, computes odometry
-└──────┬───────┘
-       │
-       ▼
-/odom (nav_msgs/Odometry)  +  TF: odom → base_link
+                ┌────────────────────────┐
+                │ diff_drive_controller  │
+                │ pure math + odometry   │
+                └───────────┬────────────┘
+                            │
+               ┌────────────┴────────────┐
+               ▼                         ▼
+         base_driver               base_sim_adapter
+       real robot path               Gazebo path
+               │                         │
+               │ serial / I2C / CAN      │ /robocept/base/drive_cmd
+               ▼                         ▼
+       Motor Controller Board      Gazebo diff-drive plugin
+               │
+               ▼
+         Motors + Encoders
+               │
+               ▼
+      /odom (nav_msgs/Odometry) + TF
 ```
 
 ## Packages
 
 | Package | Type | Purpose |
 |---|---|---|
-| `robocept_base` | ament_python | Motor driver node + diff-drive kinematics |
+| `robocept_base` | ament_python | Hardware driver, Gazebo adapter, and shared diff-drive controller |
 
 ## Interface Contract
 
@@ -87,6 +94,9 @@ source install/setup.bash
 # Start the base driver
 ros2 launch robocept_base base.launch.py
 
+# Run the same controller path against Gazebo Sim
+ros2 launch robocept_base base_sim.launch.py
+
 # Test with keyboard teleop (install teleop_twist_keyboard)
 ros2 run teleop_twist_keyboard teleop_twist_keyboard
 ```
@@ -94,6 +104,10 @@ ros2 run teleop_twist_keyboard teleop_twist_keyboard
 ## Configuration
 
 Edit `src/robocept_base/config/base.yaml` with your robot's physical parameters and motor controller settings.
+
+For simulation, `src/robocept_base/config/base_sim.yaml` matches the
+Gazebo robot dimensions and publishes the adapter output to
+`/robocept/base/drive_cmd`.
 
 ## Adding Your Motor Driver
 

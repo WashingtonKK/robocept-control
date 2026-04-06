@@ -10,14 +10,18 @@ file is a placeholder. Implement its methods for your specific motor
 controller (serial, I2C, CAN, GPIO, etc.) once you have the hardware.
 """
 
-import math
-
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist, TransformStamped
 from nav_msgs.msg import Odometry
 from std_msgs.msg import String
 from tf2_ros import TransformBroadcaster
+
+from robocept_base.diff_drive_controller import (
+    ControllerConfig,
+    DiffDriveController,
+    Pose2D,
+)
 
 
 class HardwareInterface:
@@ -100,8 +104,18 @@ class BaseDriver(Node):
         self.base_frame = self.get_parameter('base_frame_id').value
         self.do_publish_tf = self.get_parameter('publish_tf').value
 
+        self.controller = DiffDriveController(
+            ControllerConfig(
+                wheel_radius=self.wheel_radius,
+                wheel_separation=self.wheel_separation,
+                max_linear_vel=self.max_linear,
+                max_angular_vel=self.max_angular,
+                encoder_ticks_per_rev=self.ticks_per_rev,
+            )
+        )
+
         # Validate critical parameters.
-        if self.wheel_radius <= 0.0 or self.wheel_separation <= 0.0:
+        if not self.controller.is_configured():
             self.get_logger().error(
                 'wheel_radius and wheel_separation must be > 0. '
                 'Set them in config/base.yaml for your robot.'
@@ -130,9 +144,7 @@ class BaseDriver(Node):
             )
 
         # Odometry state.
-        self.x = 0.0
-        self.y = 0.0
-        self.theta = 0.0
+        self.pose = Pose2D()
         self.prev_left_ticks = 0
         self.prev_right_ticks = 0
 
@@ -164,11 +176,9 @@ class BaseDriver(Node):
 
     def _cmd_vel_callback(self, msg: Twist):
         """Store latest velocity command."""
-        self.target_linear = max(
-            -self.max_linear, min(self.max_linear, msg.linear.x)
-        )
-        self.target_angular = max(
-            -self.max_angular, min(self.max_angular, msg.angular.z)
+        self.target_linear, self.target_angular = self.controller.clamp_command(
+            msg.linear.x,
+            msg.angular.z,
         )
         self.last_cmd_time = self.get_clock().now()
 
@@ -182,66 +192,54 @@ class BaseDriver(Node):
             self.target_linear = 0.0
             self.target_angular = 0.0
 
-        # Diff-drive inverse kinematics: Twist → wheel velocities.
-        if self.wheel_radius > 0.0 and self.wheel_separation > 0.0:
-            left_vel = (
-                self.target_linear - self.target_angular
-                * self.wheel_separation / 2.0
-            ) / self.wheel_radius
-            right_vel = (
-                self.target_linear + self.target_angular
-                * self.wheel_separation / 2.0
-            ) / self.wheel_radius
-        else:
-            left_vel = 0.0
-            right_vel = 0.0
+        wheel_velocities = self.controller.body_to_wheel_velocities(
+            self.target_linear,
+            self.target_angular,
+        )
 
         # Send to hardware.
         if self.hw_connected:
-            self.hw.send_velocities(left_vel, right_vel)
+            self.hw.send_velocities(
+                wheel_velocities.left, wheel_velocities.right
+            )
 
         # Read encoders and compute odometry.
         dt = 1.0 / self.control_rate
         if self.hw_connected and self.ticks_per_rev > 0:
             left_ticks, right_ticks = self.hw.read_encoders()
-            d_left = (
-                (left_ticks - self.prev_left_ticks)
-                / self.ticks_per_rev * 2.0 * math.pi * self.wheel_radius
-            )
-            d_right = (
-                (right_ticks - self.prev_right_ticks)
-                / self.ticks_per_rev * 2.0 * math.pi * self.wheel_radius
+            d_left, d_right = self.controller.wheel_travel_from_encoder_ticks(
+                left_ticks,
+                right_ticks,
+                self.prev_left_ticks,
+                self.prev_right_ticks,
             )
             self.prev_left_ticks = left_ticks
             self.prev_right_ticks = right_ticks
         else:
             # Open-loop: estimate from commanded velocities.
-            d_left = left_vel * self.wheel_radius * dt
-            d_right = right_vel * self.wheel_radius * dt
+            d_left, d_right = self.controller.wheel_travel_from_wheel_velocities(
+                wheel_velocities,
+                dt,
+            )
 
-        # Forward kinematics.
-        d_center = (d_left + d_right) / 2.0
-        d_theta = (d_right - d_left) / max(self.wheel_separation, 0.001)
-
-        self.x += d_center * math.cos(self.theta + d_theta / 2.0)
-        self.y += d_center * math.sin(self.theta + d_theta / 2.0)
-        self.theta += d_theta
-
-        # Compute linear/angular velocity for odom message.
-        v_linear = d_center / dt if dt > 0 else 0.0
-        v_angular = d_theta / dt if dt > 0 else 0.0
+        self.pose, motion = self.controller.integrate_motion(
+            self.pose,
+            d_left,
+            d_right,
+            dt,
+        )
 
         # Publish odometry.
         odom = Odometry()
         odom.header.stamp = now.to_msg()
         odom.header.frame_id = self.odom_frame
         odom.child_frame_id = self.base_frame
-        odom.pose.pose.position.x = self.x
-        odom.pose.pose.position.y = self.y
-        odom.pose.pose.orientation.z = math.sin(self.theta / 2.0)
-        odom.pose.pose.orientation.w = math.cos(self.theta / 2.0)
-        odom.twist.twist.linear.x = v_linear
-        odom.twist.twist.angular.z = v_angular
+        odom.pose.pose.position.x = self.pose.x
+        odom.pose.pose.position.y = self.pose.y
+        odom.pose.pose.orientation.z = math.sin(self.pose.theta / 2.0)
+        odom.pose.pose.orientation.w = math.cos(self.pose.theta / 2.0)
+        odom.twist.twist.linear.x = motion.v_linear
+        odom.twist.twist.angular.z = motion.v_angular
         self.odom_pub.publish(odom)
 
         # Publish TF: odom → base_link.
@@ -250,10 +248,10 @@ class BaseDriver(Node):
             t.header.stamp = now.to_msg()
             t.header.frame_id = self.odom_frame
             t.child_frame_id = self.base_frame
-            t.transform.translation.x = self.x
-            t.transform.translation.y = self.y
-            t.transform.rotation.z = math.sin(self.theta / 2.0)
-            t.transform.rotation.w = math.cos(self.theta / 2.0)
+            t.transform.translation.x = self.pose.x
+            t.transform.translation.y = self.pose.y
+            t.transform.rotation.z = math.sin(self.pose.theta / 2.0)
+            t.transform.rotation.w = math.cos(self.pose.theta / 2.0)
             self.tf_broadcaster.sendTransform(t)
 
     def _publish_status(self):
